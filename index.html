@@ -10,6 +10,7 @@
 <meta name="apple-mobile-web-app-title" content="Al Madhi">
 <link rel="apple-touch-icon" href="icon-512.png?v=3">
 <link rel="preconnect" href="https://www.gstatic.com" crossorigin>
+<link rel="preconnect" href="https://almadhi-demo-default-rtdb.firebaseio.com" crossorigin>
 <link rel="icon" type="image/png" href="icon-512.png?v=3">
 <link rel="manifest" href="manifest.json?v=3">
 <title>Al Madhi Carpentry — ERP</title>
@@ -3474,11 +3475,21 @@ body.mode-sales .hero-kpi  { border-color: var(--hl-gold-soft) !important; }
 
 /* ── SIDEBAR FOOTER (collapse control) ── */
 .sb-foot { border-top: 1px solid var(--border); padding: 8px 10px; flex-shrink: 0; }
-#sb-collapse-btn { display: flex; align-items: center; gap: 12px; width: 100%; padding: 10px 12px;
+#sb-collapse-btn { position: relative; display: flex; align-items: center; gap: 12px; width: 100%; padding: 10px 12px;
   border: none; background: none; cursor: pointer; border-radius: 10px; color: var(--t3);
   font-family: var(--font); font-size: 13px; font-weight: 700; transition: background .14s, color .14s; }
 #sb-collapse-btn:hover { background: var(--surface2); color: var(--t1); }
 #sb-collapse-btn svg { width: 18px; height: 18px; flex-shrink: 0; transition: transform .26s; }
+
+/* Tiny connection-status dot — no label, just a pointer so it never competes
+   for space with the "Collapse" text. Grey = not connected, green = live. */
+#sb-sync-dot {
+  width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0;
+  margin-left: auto; background: #9ca3af; transition: background-color .25s;
+}
+#sb-sync-dot.live    { background: #22c55e; box-shadow: 0 0 4px rgba(34,197,94,.65); }
+#sb-sync-dot.syncing { background: #eab308; }
+#sb-sync-dot.error   { background: #ef4444; }
 
 /* ── COLLAPSED / RAIL: icons only — targets the Zoho .zm-* menu that the
    sidebar actually uses (the old .nav-item rules matched nothing). ── */
@@ -3500,8 +3511,14 @@ body.sb-collapsed #sidebar .zm-item.active::before,
 body.sb-collapsed #sidebar .zm-subitem.active::before { display: none; }  /* drop the left accent bar in rail */
 body.sb-collapsed #sidebar .sb-foot { padding: 8px 6px; }
 body.sb-collapsed #sb-collapse-btn { justify-content: center; padding: 10px 0; }
-body.sb-collapsed #sb-collapse-btn > span { display: none; }
+body.sb-collapsed #sb-collapse-btn > span.sb-collapse-label { display: none; }
 body.sb-collapsed #sb-collapse-btn svg { transform: rotate(180deg); }
+/* Collapsed: the "Collapse" label is gone and the button just centers the
+   icon, so pin the dot to the button's corner instead of trying to sit in a
+   flex row that no longer has room for it. */
+body.sb-collapsed #sb-sync-dot { position: absolute; top: 6px; right: 12px; margin-left: 0; }
+
+
 
 /* ═══════════ SIDEBAR SHELL — collapsible at every size ≥600px ═══════════
    One system for tablet, Fold-inner (8") and desktop. The sidebar sits below
@@ -4786,7 +4803,8 @@ document.addEventListener('DOMContentLoaded', () => lockInit());
   <div class="sb-foot">
     <button id="sb-collapse-btn" onclick="toggleSidebar()" aria-label="Collapse sidebar" title="Collapse sidebar">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
-      <span>Collapse</span>
+      <span class="sb-collapse-label">Collapse</span>
+      <span id="sb-sync-dot" title="Connecting…" aria-hidden="true"></span>
     </button>
   </div>
 </nav>
@@ -6987,8 +7005,78 @@ window.dispatchEvent(new Event("firebaseReady"));
 
 // Offline write queue — stores writes that failed when offline, replays on reconnect
 window._writeQueue = [];
-window.addEventListener('online',  () => { if(window._fbGoOnline  && window._db) window._fbGoOnline(window._db);  replayWriteQueue(); });
-window.addEventListener('offline', () => { if(window._fbGoOffline && window._db) window._fbGoOffline(window._db); });
+
+// ── REAL Firebase connection state (".info/connected") ──────────────────
+// navigator.onLine only reflects whether the network *interface* is up, not
+// whether the Firebase socket itself is alive — on flaky wifi/mobile data the
+// two disagree constantly, which is what made the app look like it kept
+// "losing connection". This is Firebase's own authoritative signal, so the
+// sync pill / offline banner should be driven by this instead.
+window._firebaseConnected = false;
+onValue(ref(db, ".info/connected"), (snap) => {
+  const isConnected = snap.val() === true;
+  const wasConnected = window._firebaseConnected;
+  window._firebaseConnected = isConnected;
+  if(isConnected) {
+    if(typeof hideOfflineBanner === 'function') hideOfflineBanner();
+    if(typeof setSyncStatus === 'function') setSyncStatus('live');
+    if(!wasConnected) replayWriteQueue();
+  } else {
+    if(typeof showOfflineBanner === 'function') showOfflineBanner();
+    if(typeof setSyncStatus === 'function') setSyncStatus('');
+  }
+});
+
+// Mobile browsers frequently suspend the underlying websocket when a tab is
+// backgrounded (app switched away, phone locked) without ever firing a
+// browser 'offline' event, then don't always resume it promptly on their
+// own. Nudge Firebase to reconnect the moment the tab becomes visible again,
+// instead of leaving the user staring at a stale "Live" pill.
+document.addEventListener('visibilitychange', () => {
+  if(document.visibilityState === 'visible' && window._fbGoOnline && window._db) {
+    window._fbGoOnline(window._db);
+  }
+});
+
+// ── Surface real listener errors instead of failing silently ────────────
+// Every onValue() call below previously had no error callback, so if the
+// Realtime Database security rules blocked a read (most common cause:
+// rules require auth, and this app never signs in), the listener would just
+// never fire again — no data, no error, no clue. That's exactly what makes
+// a stuck "Connecting…" state impossible to diagnose. This gives every
+// listener a shared error handler that logs the real error and — for the
+// common permission-denied case — shows one clear, one-time toast instead
+// of silence.
+window._fbPermDeniedWarned = false;
+window._fbListenErr = function(label) {
+  return function(err) {
+    console.error('[Firebase] listener error on "' + label + '":', err);
+    const code = (err && err.code) || '';
+    if(/permission_denied/i.test(code) || /permission_denied/i.test((err&&err.message)||'')) {
+      if(!window._fbPermDeniedWarned) {
+        window._fbPermDeniedWarned = true;
+        if(typeof toast === 'function') {
+          toast('Firebase blocked reading "' + label + '" — check your Realtime Database security rules (permission denied)', 'error');
+        }
+      }
+    } else if(typeof toast === 'function') {
+      toast('Firebase error on "' + label + '": ' + ((err&&err.message)||'unknown'), 'error');
+    }
+  };
+};
+
+
+// NOTE: we deliberately do NOT call goOffline()/goOnline() in response to the
+// browser's 'online'/'offline' events anymore. Those events can fire
+// repeatedly in quick succession on an unstable connection, and every
+// goOffline()->goOnline() cycle forces Firebase to tear down and fully
+// re-handshake its socket — which is exactly what produced the "losing
+// connection again and again, slow to reconnect" symptom. Firebase's own
+// client already auto-reconnects (with backoff) far more efficiently than
+// that manual teardown/rebuild did; we just replay queued writes once
+// ".info/connected" confirms we're actually back, and use the browser events
+// only as a lightweight hint to try replaying sooner.
+window.addEventListener('online',  () => { replayWriteQueue(); });
 </script>
 
 <script>
@@ -7067,6 +7155,11 @@ const BUILTIN_PAIDBY   = ['ZIAD','ZULFIQAR','OTHER'];
 function setSyncStatus(s) {
   const pill = document.getElementById('sync-pill');
   const lbl = document.getElementById('sync-label');
+  const dot = document.getElementById('sb-sync-dot');
+  if(dot) {
+    dot.className = s;
+    dot.title = s==='live' ? 'Connected' : s==='syncing' ? 'Syncing…' : 'Offline / connecting…';
+  }
   if(!pill) return;
   pill.className = s;
   const txt = s==='live' ? 'Live' : s==='syncing' ? 'Syncing' : 'Offline';
@@ -7167,7 +7260,7 @@ function attachFirebaseListeners() {
       // matching the active sidebar mode, or the non-active side goes stale
       // until the user happens to switch modes.
       else if(_isDashboardActive()) renderDashboard();
-    });
+    }, window._fbListenErr(moduleKey+'/records'));
 
     onValue(ref(db, root+'/payments'), snap => {
       const data = snap.val();
@@ -7175,7 +7268,7 @@ function attachFirebaseListeners() {
       mod.payments.sort((a,b) => (b.date||'').localeCompare(a.date||''));
       if(DB.mode === moduleKey) { refreshCurrentPage(); populateAllDropdowns(); scheduleCashDateRepair(); }
       else if(_isDashboardActive()) renderDashboard();
-    });
+    }, window._fbListenErr(moduleKey+'/payments'));
 
     // Delivery Notes — same live-sync pattern as records/payments, kept in its
     // own node so it never touches or risks existing invoice data.
@@ -7237,9 +7330,24 @@ function attachFirebaseListeners() {
       localStorage.setItem(LOCK.STORAGE_KEY, remote);
       // If currently showing lock screen, it will now check against this remote hash
     }
-  });
+  }, window._fbListenErr('settings'));
 
   if(typeof attachErpListeners==='function') attachErpListeners();
+}
+
+// Shows a toast at most once per cooldown window per "key" — used so a write
+// that keeps failing for the SAME reason (e.g. rules blocking it) doesn't
+// spam an identical toast every few seconds.
+window._fbToastCooldowns = window._fbToastCooldowns || {};
+function fbToastThrottled(key, message, type, cooldownMs) {
+  const now = Date.now();
+  const last = window._fbToastCooldowns[key] || 0;
+  if(now - last < (cooldownMs || 20000)) return;
+  window._fbToastCooldowns[key] = now;
+  if(typeof toast === 'function') toast(message, type);
+}
+function _fbIsPermissionDenied(e) {
+  return /permission_denied/i.test((e && e.code) || '') || /permission_denied/i.test((e && e.message) || '');
 }
 
 // ── Firebase write helpers ───────────────────────────────
@@ -7250,7 +7358,7 @@ async function fbWrite(path, value) {
     window._writeQueue = window._writeQueue || [];
     window._writeQueue.push({ path, value });
     setSyncStatus('syncing');
-    toast('Offline — write queued, will sync when reconnected', 'warn');
+    fbToastThrottled('write-offline', 'Offline — write queued, will sync when reconnected', 'warn', 15000);
     return true; // optimistic
   }
   setSyncStatus('syncing');
@@ -7263,32 +7371,71 @@ async function fbWrite(path, value) {
     window._writeQueue = window._writeQueue || [];
     window._writeQueue.push({ path, value });
     setSyncStatus('');
-    toast('Save queued — will retry when online', 'warn');
+    console.error('[Firebase] write failed for "' + path + '":', e);
+    if(_fbIsPermissionDenied(e)) {
+      // This is NOT a connectivity problem — retrying won't help until the
+      // Realtime Database security rules are changed to allow this write.
+      // Say so plainly instead of implying it'll just fix itself "when online".
+      fbToastThrottled('write-denied', 'Save blocked by Firebase security rules (permission denied) — this keeps failing until the database rules allow writes', 'error', 30000);
+    } else {
+      fbToastThrottled('write-queued', 'Save queued — will retry when online', 'warn', 15000);
+    }
     return false;
   }
 }
 
+let _replayInFlight = false;
 async function replayWriteQueue() {
+  if(_replayInFlight) return; // avoid two overlapping replays double-sending the same writes
   if(!window._writeQueue || !window._writeQueue.length) return;
   if(!window._firebaseReady) return;
-  const queue = [...window._writeQueue];
-  window._writeQueue = [];
-  let failed = 0;
-  for(const item of queue) {
-    try {
-      await window._fbSet(window._fbRef(window._db, item.path), item.value);
-    } catch(e) {
-      window._writeQueue.push(item);
-      failed++;
+  _replayInFlight = true;
+  try {
+    const queue = [...window._writeQueue];
+    window._writeQueue = [];
+    let failed = 0;
+    let deniedCount = 0;
+    for(const item of queue) {
+      try {
+        await window._fbSet(window._fbRef(window._db, item.path), item.value);
+      } catch(e) {
+        window._writeQueue.push(item);
+        failed++;
+        if(_fbIsPermissionDenied(e)) deniedCount++;
+        console.error('[Firebase] retry failed for "' + item.path + '":', e);
+      }
     }
-  }
-  if(failed === 0) {
-    setSyncStatus('live');
-    if(queue.length > 0) toast('✅ ' + queue.length + ' queued write(s) synced to cloud', 'success');
-  } else {
-    toast(failed + ' write(s) still pending', 'warn');
+    if(failed === 0) {
+      setSyncStatus('live');
+      if(queue.length > 0) toast('✅ ' + queue.length + ' queued write(s) synced to cloud', 'success');
+    } else if(deniedCount === failed) {
+      // Every remaining failure is a permission error, not a connectivity one —
+      // keep this quiet on repeat runs so the safety-net interval doesn't
+      // re-toast the same unfixable error every 12 seconds.
+      fbToastThrottled('replay-denied', deniedCount + ' write(s) blocked by Firebase security rules (permission denied)', 'error', 30000);
+    } else {
+      fbToastThrottled('replay-pending', failed + ' write(s) still pending', 'warn', 20000);
+    }
+  } finally {
+    _replayInFlight = false;
   }
 }
+
+// ── Safety-net retry ─────────────────────────────────────────────────────
+// A write can land in the queue for reasons that never flip the browser's
+// online/offline state or Firebase's ".info/connected" flag (a one-off
+// timeout, a write that raced a reconnect, etc.) — with only those two
+// triggers, a queued write could get permanently stranded, which is why the
+// "Save queued — will retry when online" toast could keep reappearing
+// without the save ever actually going through. This interval gives every
+// queued write a periodic chance to go out again regardless of what
+// triggered the original failure.
+setInterval(() => {
+  if(window._writeQueue && window._writeQueue.length && window._firebaseConnected) {
+    replayWriteQueue();
+  }
+}, 12000);
+
 
 async function fbSaveRecord(rec) {
   return fbWrite(MODE_ROOT()+'/records/' + rec.id, rec);
@@ -11943,9 +12090,12 @@ window.addEventListener('DOMContentLoaded', () => {
       }
     }, 10000);
   }
-  // Offline/online detection
-  window.addEventListener('online',  () => { hideOfflineBanner(); setSyncStatus('live'); replayWriteQueue(); });
-  window.addEventListener('offline', () => { showOfflineBanner(); setSyncStatus(''); });
+  // Offline/online detection — real status now comes from the ".info/connected"
+  // listener set up alongside Firebase init (see above), which reflects the
+  // actual socket state instead of just the network interface. We still check
+  // navigator.onLine once here purely so the banner can show instantly on
+  // first paint, before the Firebase connection handshake has had a chance
+  // to report in.
   if(!navigator.onLine) showOfflineBanner();
 
   // Init entry page defaults
