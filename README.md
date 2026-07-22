@@ -64,10 +64,6 @@ flowchart TD
 
 See [`docs/DOCUMENTATION.md`](docs/DOCUMENTATION.md) for the full data model and sync details.
 
-## Screenshots
-
-*Coming soon.*
-
 ## Documentation
 
 Full technical and feature documentation (dual-mode architecture, Firebase sync, every module, form validation, keyboard shortcuts, known bug fixes): [`docs/DOCUMENTATION.md`](docs/DOCUMENTATION.md)
