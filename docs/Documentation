@@ -1,0 +1,1797 @@
+# Al Madhi Carpentry — ERP System
+## Complete Technical & Feature Documentation
+
+> **File:** `index-59.html`
+> **App Name:** Al Madhi Carpentry — ERP
+> **Company:** Al Madhi Carpentry, Al Sajaa Industrial Area, Sharjah, UAE
+> **Established:** 2003 — Manufacturing & Supplier of Wooden Pallets
+> **Architecture:** Single-file Progressive Web App (PWA) — Firebase Realtime Database (cloud-first, no localStorage primary store)
+
+---
+
+## Table of Contents
+
+1. [What This App Is](#1-what-this-app-is)
+2. [Technology Stack](#2-technology-stack)
+3. [Dual-Mode Architecture — Purchase & Sales](#3-dual-mode-architecture--purchase--sales)
+4. [Design System — Three Themes](#4-design-system--three-themes)
+5. [Data Architecture](#5-data-architecture)
+6. [Firebase Integration & Sync](#6-firebase-integration--sync)
+7. [App Layout & Navigation](#7-app-layout--navigation)
+8. [Feature: Dashboard](#8-feature-dashboard)
+9. [Feature: New Entry (Invoice Form)](#9-feature-new-entry-invoice-form)
+10. [Feature: All Records (Invoice List)](#10-feature-all-records-invoice-list)
+11. [Feature: Payments](#11-feature-payments)
+12. [Feature: Statement (Search & Statement)](#12-feature-statement-search--statement)
+13. [Feature: Cheque Register](#13-feature-cheque-register)
+14. [Feature: Expenses Module](#14-feature-expenses-module)
+15. [Feature: Delivery Notes](#15-feature-delivery-notes)
+16. [Feature: Quotations](#16-feature-quotations)
+17. [Feature: Global Search](#17-feature-global-search)
+18. [Feature: App Lock (PIN + Biometric)](#18-feature-app-lock-pin--biometric)
+19. [Feature: Party Management](#19-feature-party-management)
+20. [Feature: User Management](#20-feature-user-management)
+21. [Feature: Export & Backup](#21-feature-export--backup)
+22. [Feature: Invoice & Document Printing](#22-feature-invoice--document-printing)
+23. [Offline Read-Cache System](#23-offline-read-cache-system)
+24. [Responsive & Multi-Device Design](#24-responsive--multi-device-design)
+25. [Utility Functions & Core Logic](#25-utility-functions--core-logic)
+26. [Form Validation System](#26-form-validation-system)
+27. [Keyboard Shortcuts](#27-keyboard-shortcuts)
+28. [Critical Bug Fixes & Design Decisions](#28-critical-bug-fixes--design-decisions)
+
+---
+
+## 1. What This App Is
+
+Al Madhi ERP is a **complete enterprise resource planning system** contained in a single HTML file. Unlike a generic accounting app, it is built specifically for a wooden pallet manufacturing and trading business. The primary products are:
+
+- Wooden pallets (manufactured and traded)
+- Raw wood (purchased by the ton from suppliers)
+- Gutka (raw material, tracked in KG)
+
+The business has two distinct operational sides:
+1. **Purchase side** — buying raw materials (wood, pallets) from suppliers/vendors, paying in cash or by cheque, often dealing with Pakistan-based suppliers
+2. **Sales side** — selling pallets and wood to construction companies and traders in the UAE
+
+The app manages both of these in one codebase, with a **mode toggle** that switches the entire interface between Purchase (navy/gold theme) and Sales (teal/aqua theme). Both modules use identical UI and logic — only the data pointer and visual theme change.
+
+**What makes it different from simple accounting software:**
+- Built-in KG/Bag tracking (weight per bag × bags = total KG = total price, used for wood purchases)
+- Auto-fills the last price used for any item, prioritizing the same supplier's rates
+- A shared cheque register (across Purchase and Sales) with pending/cleared tracking
+- Bilingual invoices and statements (English and Urdu)
+- Payment receipt/voucher printing with invoice allocation
+- Delivery notes with optional company stamp
+- Quotation module with multi-item tables
+- Receivables aging analysis (FIFO-allocated, 4 buckets: 0-30, 31-60, 61-90, 90+ days)
+- Customer loyalty stars and VIP badges based on sales volume
+- An expenses module with salary tracking
+
+---
+
+## 2. Technology Stack
+
+### Core
+- Pure HTML5, CSS3, Vanilla JavaScript — no framework, no build step
+- Total: ~17,225 lines in a single file
+
+### External Libraries (CDN)
+- **jsPDF v2.5.1** — PDF generation for print popups
+- **jsPDF-AutoTable v3.5.31** — Table formatting inside PDFs
+- **SheetJS (xlsx) v0.18.5** — Excel export/import for records and cheques
+
+### Firebase (ESM module, loaded from Google CDN)
+```javascript
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import { getDatabase, ref, set, onValue, push, update, remove, get, runTransaction, goOffline, goOnline }
+  from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+```
+Firebase is imported as an ES module (not the compat version used in the Al Farasha app). All Firebase references are exposed on `window._db`, `window._fbRef`, `window._fbSet`, etc., so the non-module scripts throughout the rest of the file can access them.
+
+### Fonts (Google Fonts)
+- **Plus Jakarta Sans** — primary UI and display font (weights 300–800)
+- **Noto Nastaliq Urdu** — Nastaliq-style Urdu headings
+- **Cairo** — Arabic/Urdu body text in RTL sections (labelled `--ur-font`, `--ur-naskh`)
+- **Noto Sans Arabic** — Arabic body text fallback
+
+### Storage
+- **Firebase Realtime Database** — primary and only source of truth (no localStorage for business data)
+- **localStorage** — read-only offline cache only (`almadhi_cache_purchase`, `almadhi_cache_sales`)
+- **sessionStorage** — app unlock state (`almadhi_unlocked`)
+- **localStorage** — PIN hash (`almadhi_pin`), biometric credential ID (`almadhi_bio_cred`)
+
+---
+
+## 3. Dual-Mode Architecture — Purchase & Sales
+
+### The Core Concept
+
+The entire ERP runs two completely separate ledgers — Purchase and Sales — from one codebase. This is the most important architectural concept in the whole app.
+
+```javascript
+let DB = {
+  mode: 'purchase',       // Active module. Always starts on Purchase.
+  purchase: _blankModule(),
+  sales:    _blankModule(),
+};
+
+function AD() { return DB.mode === 'sales' ? DB.sales : DB.purchase; }
+```
+
+`AD()` — **Active Dataset** — is the single pointer through which ALL page renders, form saves, and CRUD functions operate. No function directly touches `DB.purchase` or `DB.sales`. They all call `AD()`. This means every feature (invoice form, payment list, statement, etc.) is automatically mode-aware with zero extra code per feature.
+
+### What Each Module Contains (`_blankModule()`)
+```javascript
+function _blankModule() {
+  return {
+    records:        [],   // Invoice / bill records
+    payments:       [],   // Payment records
+    cheques:        [],   // NOT used here — shared via CHQ()
+    deliveryNotes:  [],   // Delivery note records
+    nextId:         1,    // Auto-increment record counter
+    nextInv:        1,    // Auto-increment invoice number
+    nextDN:         1,    // Auto-increment delivery note number
+    customParties:  [],   // User-added parties/vendors/customers
+    customDescs:    [],   // User-added item descriptions
+    customUnits:    [],   // User-added units of measure
+    customMethods:  [],   // User-added payment methods
+    customPaidBy:   []    // User-added "paid by" names
+  };
+}
+```
+
+### The Shared Cheque Register
+
+Cheques are intentionally **not** scoped to either module. They live in one shared Firebase node (`almadhi/cheques`) and one in-memory array:
+
+```javascript
+function CHQ()      { return DB.purchase.cheques; }   // Single source of truth
+function CHQ_ROOT() { return 'almadhi'; }
+```
+
+Reason: A cheque may be issued by a supplier (purchase context) but cleared on the bank account (not mode-specific). Keeping them shared prevents a supplier's cheque from disappearing when someone switches to Sales mode.
+
+### Firebase Path Routing
+
+```javascript
+function MODE_ROOT(mode) {
+  return (mode || DB.mode) === 'sales' ? 'almadhi/sales' : 'almadhi';
+}
+```
+
+- Purchase data lives at: `almadhi/records`, `almadhi/payments`, `almadhi/deliveryNotes`, `almadhi/meta`, `almadhi/custom`
+- Sales data lives at: `almadhi/sales/records`, `almadhi/sales/payments`, etc.
+- Cheques live at: `almadhi/cheques` (shared)
+- Settings live at: `almadhi/settings` (shared)
+
+This means no data migration was ever needed — Sales was added as a new parallel namespace.
+
+### Mode Switching
+
+```javascript
+function setAppMode(mode) {
+  DB.mode = mode;
+  document.body.classList.toggle('mode-sales', mode === 'sales');
+  // Refreshes all dropdowns, re-renders current page, updates menu highlights
+}
+```
+
+Switching mode is **instant** because both modules' Firebase listeners are active simultaneously (attached at startup for both `purchase` and `sales` roots). When data arrives for either module, it loads into `DB.purchase` or `DB.sales` immediately. The sidebar toggle is never waiting for a fresh fetch.
+
+### Mode-Specific Built-in Data
+
+```javascript
+const BUILTIN_DESCS_BY_MODE = {
+  purchase: [
+    { name:'PURCHASE WOOD',              unit:'TON' },
+    { name:'PURCHASE WOOD (SMALL WOOD)', unit:'TON' },
+    { name:'PALLET PURCHASE',            unit:'PCS' },
+    { name:'GUTKA PURCHASE',             unit:'KG'  },
+  ],
+  sales: [
+    { name:'PALLET SALE',  unit:'PCS' },
+    { name:'WOOD SALE',    unit:'TON' },
+    { name:'GUTKA SALE',   unit:'KG'  },
+  ],
+};
+```
+
+Cash party names are also mode-specific:
+```javascript
+const CASH_PARTIES_BY_MODE = {
+  purchase: ['CASH WOOD', 'CASH PALLETS'],
+  sales:    ['CASH SALE']
+};
+```
+
+These are the "virtual" parties for cash transactions — wallets that represent on-the-spot cash payments.
+
+---
+
+## 4. Design System — Three Themes
+
+The app has three distinct visual themes driven entirely by CSS custom properties (variables), making the whole system responsive to a single body class toggle. No JavaScript rewrites any styles beyond toggling class names.
+
+### Theme 1: Purchase Mode — Harbor Navy + Refined Gold (Default)
+
+```css
+--hdr-bg:    #0a1f3d;   /* Deep navy — header */
+--gold:      #c69320;   /* Primary accent — gold */
+--gold2:     #dcae35;   /* Lighter gold — fills */
+--gold3:     #f2cf63;   /* Bright highlight gold */
+--bg:        #e7edf6;   /* Cool arctic blue-grey background */
+--accent-1:  #2f6bf0;   /* Blue — action buttons in Purchase */
+```
+
+### Theme 2: Sales Mode — Deep Teal + Aqua Glass
+
+Applied when `body.mode-sales` is active:
+```css
+--hdr-bg:  #07463d;   /* Deep forest teal — header */
+--gold:    #0b8f7c;   /* Teal replaces gold as the brand accent */
+--gold2:   #0ea58f;   /* Aqua fill */
+--gold3:   #5fe3cd;   /* Bright aqua highlight */
+--bg:      #e4f3ef;   /* Light mint-green background */
+--accent-1: #0b8f7c;  /* Aqua — primary action buttons */
+```
+
+Every button, form focus ring, scrollbar thumb, spinner, and hover glow reads from `--accent-1` / `--accent-solid`. So switching modes immediately recolors every interactive element to match.
+
+### Theme 3: Dark Mode
+
+Applied when `body.dark-mode` is active:
+```css
+--bg:      #091120;   /* Deep navy-black */
+--surface: #0f1c30;   /* Slightly lighter navy */
+--t1:      #eaf0f8;   /* Primary text: near-white */
+--t2:      #a7b4c8;   /* Secondary text: muted blue-grey */
+```
+
+Dark mode also has a `body.dark-mode.mode-sales` variant with deep desaturated teal surfaces. The statement document is **always light** regardless of dark mode, because printed statements must be readable:
+```css
+body.dark-mode #statement-area { background: #fff; border-color: #eee; }
+```
+
+### Theme-Aware Accent System
+
+The most important design decision is the accent variable system. Every single interactive element (button, focused field, scrollbar, spinner, loading bar) reads from the same set of variables:
+
+```css
+--accent-1:             /* Primary gradient stop */
+--accent-2:             /* Secondary gradient stop */
+--accent-solid:         /* Single flat color */
+--accent-text:          /* Text color version */
+--accent-ring:          /* Focus ring color */
+--accent-shadow:        /* Button shadow */
+--accent-glow:          /* Hover glow */
+--accent-bg-soft:       /* Hover background */
+--accent-border-soft:   /* Hover border */
+```
+
+These are defined globally for Purchase (blue), then overridden in `body.mode-sales` (aqua). This means the same CSS for `.btn-primary`, `.form-group input:focus`, and `::-webkit-scrollbar-thumb` automatically adapts — no mode-specific CSS needed for individual components.
+
+### Invoice Document Design — "Obsidian & Gold Premium"
+
+The invoice document (`.inv-doc`) has a distinct visual identity separate from the app UI:
+- White background always (regardless of dark mode)
+- 8px gradient top bar: `#0a1f3d` (navy) → `#c08a14` (gold)
+- Company name in 26px navy bold, TRN/tag in gold uppercase
+- Invoice number in a navy chip block
+- Item table with navy `#0a1f3d` header row
+- Grand total in a navy rounded block with white text
+
+The Urdu invoice (`.uinv-doc`) mirrors this exactly but with `direction: rtl`. Numbers, dates, and the invoice number stay `direction: ltr` even inside the RTL document for legibility — a specific inline override applied to those cells.
+
+---
+
+## 5. Data Architecture
+
+### In-Memory Structure
+
+```javascript
+let DB = {
+  mode:     'purchase',
+  purchase: { records, payments, cheques, deliveryNotes, nextId, nextInv, nextDN, customParties, customDescs, customUnits, customMethods, customPaidBy },
+  sales:    { records, payments, cheques, deliveryNotes, nextId, nextInv, nextDN, customParties, customDescs, customUnits, customMethods, customPaidBy },
+  settings: {},     // PIN hash, stamp settings, etc.
+  expenses: [],     // Business expenses (separate from records/payments)
+  salPayments: []   // Salary payment log
+};
+```
+
+### Record (Invoice/Bill) Object
+
+```json
+{
+  "id": 42,
+  "invNo": "INV-042",
+  "date": "2025-07-22",
+  "party": "AL QURESHI TRADING",
+  "items": [
+    { "desc": "PALLET PURCHASE", "qty": 200, "unit": "PCS", "price": 22.50, "amount": 4500.00 },
+    { "desc": "GUTKA PURCHASE",  "qty": 50,  "unit": "KG",  "kgPerBag": 25, "totalKg": 1250, "price": 1.20, "amount": 1500.00 }
+  ],
+  "amount": 6000.00,
+  "vehicle": "PO-2024-88",
+  "method": "CHEQUE",
+  "notes": "Cheque #4421",
+  "vatEnabled": false,
+  "vatAmount": 0,
+  "createdAt": "2025-07-22T10:30:00.000Z"
+}
+```
+
+Note: `vehicle` is the field repurposed as "PO Number" (not literally a vehicle — the field name was kept from an earlier version for backward compatibility).
+
+### Payment Object
+
+```json
+{
+  "id": "pay_abc123",
+  "date": "2025-07-22",
+  "party": "AL QURESHI TRADING",
+  "amount": 3000.00,
+  "method": "CASH",
+  "paidBy": "ZIAD",
+  "invoicePeriod": "July 2025",
+  "notes": "Partial settlement",
+  "createdAt": 1721646600000,
+  "allocations": [
+    { "invId": 42, "allocated": 3000 }
+  ]
+}
+```
+
+Payments can have `allocations` — explicit links to which invoice(s) the payment covers. This powers the payment receipt printout which shows "Linked Invoice: INV-042 | Allocated: AED 3,000.00 | Invoice Balance: AED 3,000.00".
+
+### Cheque Object
+
+```json
+{
+  "id": "chq_xyz789",
+  "party": "AL MADHI CARPENTRY",
+  "chequeNo": "441892",
+  "amount": 15000.00,
+  "date": "2025-08-15",
+  "givenDate": "2025-07-22",
+  "note": "August payment",
+  "cleared": false,
+  "createdAt": 1721646600000
+}
+```
+
+Key fields: `date` is the cheque date (when it can be presented to the bank), `givenDate` is when it was handed over, `cleared` is toggled when the cheque physically clears the bank.
+
+### Delivery Note Object
+
+```json
+{
+  "id": "dn_001",
+  "dnNo": "DN-001",
+  "date": "2025-07-22",
+  "linkedInvoice": "INV-042",
+  "party": "CUSTOMER NAME",
+  "contact": "Attn: Manager",
+  "phone": "+971 50 123 4567",
+  "email": "customer@example.com",
+  "trn": "100xxxxxxxxxx03",
+  "address": "Al Quoz, Dubai",
+  "salesperson": "ZIAD",
+  "poNo": "PO-2024-88",
+  "vehicleNo": "S-12345",
+  "driverName": "Ahmed",
+  "items": [
+    { "desc": "WOODEN PALLET", "unit": "PCS", "qty": 200, "remarks": "Standard 1200×1000" }
+  ],
+  "notes": "Handle with care",
+  "terms": "Goods once delivered cannot be returned.",
+  "receiverName": "",
+  "updatedAt": "2025-07-22T12:00:00.000Z"
+}
+```
+
+### Party Object (Custom Party)
+
+```json
+{
+  "name": "AL QURESHI TRADING",
+  "nameUr": "القریشی ٹریڈنگ",
+  "contactEn": "MAJEED QURESHI",
+  "contactUr": "مجید قریشی",
+  "companyEn": "Al Qureshi Trading LLC",
+  "companyUr": "القریشی ٹریڈنگ ایل ایل سی",
+  "phone": "+971 55 123 4567",
+  "trn": "100xxxxxxxxxx03",
+  "email": "info@alqureshi.ae",
+  "addressEn": "Al Sajaa Ind. Area, Sharjah",
+  "addressUr": "الصجعہ صنعتی علاقہ، شارجہ",
+  "creditLimit": 50000,
+  "creditDays": 30
+}
+```
+
+The `name` field is the **immutable matching key** — it links this party object to every invoice and payment that uses that party name. Changing it would break all historical links. So the Party Edit Modal never changes `name`; it only updates metadata fields like `contactEn`, `companyEn`, etc.
+
+---
+
+## 6. Firebase Integration & Sync
+
+### Module: ES Module Import
+
+Firebase is loaded as an ES module in a `<script type="module">` block. This is different from the compat version — it uses tree-shakable named imports:
+
+```javascript
+import { initializeApp } from "...firebase-app.js";
+import { getDatabase, ref, set, onValue, push, update, remove, get, runTransaction, goOffline, goOnline }
+  from "...firebase-database.js";
+```
+
+All these are exposed as `window._fbRef`, `window._fbSet`, etc. so the regular `<script>` blocks later in the file can use them without being modules themselves. This is a bridge pattern: the module sets up Firebase, regular scripts operate it.
+
+### Live Listener Architecture
+
+Both Purchase and Sales modules are subscribed simultaneously at startup:
+
+```javascript
+['purchase', 'sales'].forEach(moduleKey => {
+  const root = MODE_ROOT(moduleKey);
+  const mod  = DB[moduleKey];
+
+  onValue(ref(db, root+'/records'), snap => {
+    mod.records = snap.val() ? Object.values(snap.val()) : [];
+    mod.records.sort((a,b) => (b.date||'').localeCompare(a.date||''));
+    if(DB.mode === moduleKey) { refreshCurrentPage(); populateAllDropdowns(); }
+    else if(_isDashboardActive()) renderDashboard();
+  });
+  // Same for payments, deliveryNotes, meta, custom
+});
+```
+
+The key insight: **the dashboard is unified** — it reads from both `DB.purchase` and `DB.sales` together. So when Sales data changes, even if the user is in Purchase mode, the dashboard must redraw. This is handled by the `_isDashboardActive()` check — if the dashboard is the active page, a change in either module triggers a full dashboard re-render.
+
+### Offline Write Queue
+
+```javascript
+window._writeQueue = [];
+
+async function fbWrite(path, value) {
+  if(!navigator.onLine) {
+    window._writeQueue.push({ path, value });
+    setSyncStatus('syncing');
+    toast('Offline — write queued, will sync when reconnected', 'warn');
+    return true; // Optimistic — caller proceeds as if it worked
+  }
+  // Online: try the write
+  try {
+    await window._fbSet(window._fbRef(window._db, path), value);
+    setSyncStatus('live');
+    return true;
+  } catch(e) {
+    window._writeQueue.push({ path, value });
+    setSyncStatus('');
+    toast('Save queued — will retry when online', 'warn');
+    return false;
+  }
+}
+
+window.addEventListener('online', () => {
+  if(window._fbGoOnline && window._db) window._fbGoOnline(window._db);
+  replayWriteQueue();
+});
+window.addEventListener('offline', () => {
+  if(window._fbGoOffline && window._db) window._fbGoOffline(window._db);
+});
+```
+
+`replayWriteQueue()` processes all queued writes sequentially when the device comes online. Failed replays stay in the queue. Successful ones are cleared.
+
+### PIN Hash Sync via Firebase Settings
+
+The lock PIN hash is synced across devices through Firebase:
+
+```javascript
+onValue(ref(db, 'almadhi/settings'), snap => {
+  DB.settings = snap.val() || {};
+  const remote = DB.settings.pinHash;
+  if(remote) {
+    localStorage.setItem(LOCK.STORAGE_KEY, remote);  // Update local copy
+  }
+});
+```
+
+This means changing the PIN on one device automatically updates it on all other devices signed into the same Firebase project — within seconds.
+
+### Firebase Loading Overlay
+
+The app shows a skeleton loading screen with animated shimmer cards while Firebase connects on first load. Three loading states:
+1. **Connecting** — animated dots, skeleton cards with shimmer animation
+2. **Connected** — overlay fades out and removes itself from DOM
+3. **Offline** — shows a small pulsing WiFi-off icon in the topbar (not a full banner)
+
+### Trash / Soft Delete
+
+When records, payments, cheques, or delivery notes are deleted, they are written to a `almadhi/trash/` node first, then removed from the real location:
+
+```javascript
+await fbWrite('almadhi/trash/record_'+id, { ...backup, _deletedAt: new Date().toISOString(), _kind: 'record', _module: DB.mode });
+await window._fbRemove(window._fbRef(window._db, MODE_ROOT()+'/records/'+id));
+```
+
+This gives a recovery path if something is accidentally deleted. Combined with the undo toast (5-second window), deleted data can be recovered from trash manually if needed.
+
+---
+
+## 7. App Layout & Navigation
+
+### Navigation Layers
+
+The app has **four simultaneous navigation systems**, each optimized for a different device:
+
+**1. Bottom Nav Bar (Mobile ≤ 640px)**
+A floating pill dock at the bottom with 5 buttons: Home, Records, New (center), Statement, Payments. The center "New" button is the primary action (adds an invoice).
+
+**2. Topbar Inline Nav (Tablets 8"–12")**
+A pill-capsule nav bar inside the topbar with a sliding indicator that moves to the active page. Used on mid-size screens where the bottom nav would feel too cramped but a full sidebar isn't needed.
+
+**3. Persistent Sidebar (Desktop ≥ 900px)**
+A collapsible left sidebar (`--sidebar-w: 236px`) with a Zoho Books-style hierarchical accordion menu. Can collapse to a narrow 64px rail (`--rail-w: 64px`) showing only icons, with flyout submenus on icon hover.
+
+**4. Drawer (All Sizes)**
+A hamburger-triggered slide-in drawer containing the full menu, accessible on all screen sizes. On mobile it's the primary full-menu option.
+
+### Zoho-Style Accordion Menu (`zmenu`)
+
+The sidebar and drawer use the same HTML structure — a `zmenu` class with `zm-group` elements:
+
+```html
+<div class="zmenu">
+  <div class="zm-group open">
+    <div class="zm-head" onclick="toggleMenuGroup(this)">Purchase</div>
+    <div class="zm-items">
+      <a data-nav="purchase:records">Records</a>
+      <a data-nav="purchase:entry">New Entry</a>
+    </div>
+  </div>
+  <div class="zm-group">
+    <div class="zm-head" onclick="toggleMenuGroup(this)">Sales</div>
+    <div class="zm-items">
+      <a data-nav="sales:records">Records</a>
+    </div>
+  </div>
+</div>
+```
+
+`data-nav` format: `"mode:page"` or `"any:page"` (mode-agnostic). When `syncMainMenu()` runs after navigation, it:
+1. Reads the current page and active mode
+2. Marks only items where both mode AND page match as `.active`
+3. Auto-expands the group containing the active item
+4. Closes all other groups (accordion behavior)
+
+The `navMain(mode, page)` function handles navigation:
+- If a mode is specified and differs from current → switches mode first
+- Then shows the page
+- Then closes the drawer
+- Then syncs the menu
+
+### Page System
+
+All pages are `<div class="page" id="page-NAME">` divs. Only one has the `.active` class at a time. `showPage(name)` handles switching without any routing library.
+
+### Sidebar Collapsed Rail
+
+When the sidebar is collapsed to the 64px rail state, clicking a group head triggers `_showFlyout(headEl)` — a floating popup positioned next to the icon showing that group's submenu items. This mirrors the Zoho Books behavior exactly. The collapsed state is persisted in `localStorage` so it survives page reloads.
+
+---
+
+## 8. Feature: Dashboard
+
+### Unified Dashboard Philosophy
+
+The dashboard is the one page that reads from BOTH `DB.purchase` AND `DB.sales` simultaneously. It shows a single view of the whole business — raw material costs, product revenue, total outstanding from all customers and suppliers. The hero KPI card has a local toggle (Purchase / Sales / Expenses) but the rest of the dashboard panels always show the combined picture.
+
+### Date Range Filter
+
+A date range dropdown at the top right (not inside a page — it's part of the page header itself):
+- This Month / Last Month / Last 3 Months / Last 6 Months / This Year / All Time
+- Custom Range (from/to date picker)
+
+The selected range is stored in a `dashRange` object and all dashboard calculations filter through:
+```javascript
+function rangeRecords()  { return dashHasRange() ? AD().records.filter(r => dashInRange(r.date))  : AD().records; }
+function rangePayments() { return dashHasRange() ? AD().payments.filter(p => dashInRange(p.date)) : AD().payments; }
+```
+
+### Hero KPI Card
+
+The large gradient card at the top of the dashboard. It has a **local mode toggle** (Purchase view / Sales view / Expenses view) that only affects this card — it does NOT change `DB.mode` or affect any other panel. This is important: pressing "Sales" on the hero card to see revenue figures doesn't affect the sidebar navigation or any other dropdown.
+
+```javascript
+window._heroView = null; // unset = follows DB.mode
+// Toggling only sets _heroView; the hero card checks this before rendering
+```
+
+The hero card shows:
+- Total billed (invoices in range)
+- Total received (payments in range)
+- Outstanding balance
+- Collection rate as a progress bar with animation
+
+The collection rate bar animates in with a CSS animation (`hkcGrow`) using `cubic-bezier(.34,1.56,.64,1)` — a slight overshoot for a spring feel. The fill color is an aqua gradient in Sales mode.
+
+### Quick Actions Grid
+
+Four tiles linking to the most common entry points:
+- New Sale → `navMain('sales', 'entry')`
+- New Purchase → `navMain('purchase', 'entry')`
+- Expenses → `navMain(null, 'expenses')`
+- Cheque List → `navMain(null, 'cheques')`
+
+### Cheque Reminders Panel
+
+Full-width card showing all cheques due within the current week (7 days forward from today). Rendered by `renderChqReminder()`. If there are none, the panel hides itself.
+
+### Three Overview Panels (3-column grid)
+
+**Outstanding Panel** — tappable. Shows total outstanding across all parties. Clicking navigates to the party balance table and flashes it.
+
+**Recent Activity Panel** — shows the last ~8 events (records and payments combined), sorted by `createdAt` timestamp. Tapping navigates to the All Records page.
+
+**Collections Panel** — shows customers who have outstanding balances with a "Send Reminder" function. Has a language toggle (EN / UR) — switches the reminder message language. The language preference is stored and remembered.
+
+### Top Customers & Suppliers (by open balance)
+
+Shows the top-ranked parties from both Purchase and Sales combined, ranked by their outstanding balance. Each has a proportional horizontal bar (same concept as Al Farasha). The overall Outstanding Balance Table below this shows ALL parties with columns: #, Party, Type (Customer/Supplier), Billed, Settled, Balance.
+
+### Dashboard Charts & Analytics (Sales Mode)
+
+When Sales mode is active, additional charts appear:
+
+**Receivables Aging — Stacked Bar**
+Calculated using **FIFO allocation**: each customer's total received is consumed against their oldest invoices first. Whatever remains on each invoice is bucketed by age:
+- 0-30 days (green)
+- 31-60 days (amber)
+- 61-90 days (orange)
+- 90+ days (red)
+
+```javascript
+function _agingBuckets() {
+  getParties().forEach(p => {
+    let paid = sumPaymentsForParty(p);
+    invs.forEach(r => {
+      let owed = r.amount;
+      if(paid > 0) { const used = Math.min(paid, owed); owed -= used; paid -= used; }
+      if(owed <= 0.5) return;
+      // Bucket by invoice age in days
+    });
+  });
+}
+```
+
+Clicking any segment in the bar navigates to the Records page filtered to that age group.
+
+**Product Revenue Mix — Donut Chart**
+SVG donut chart drawn programmatically (no chart library). Each item description's total revenue is a slice. Computed via `_revenueMix()` which aggregates amounts by `it.desc` across all line items.
+
+```javascript
+function _donutSvg(slices, size, stroke) {
+  // Pure SVG: overlapping circles with stroke-dasharray for each slice
+}
+```
+
+**Customer Loyalty Stars**
+Each customer in the party table has star ratings (1-5) based on their total purchase volume. VIP badge (gradient pill) for top customers. Risk flag icon for customers with old overdue balances.
+
+**Monthly Sales & Receipts Bar Chart**
+A CSS-only bar chart showing the last 6 months of billing vs. receipts as paired vertical bars. No canvas or SVG — pure HTML div elements with dynamic height percentages.
+
+---
+
+## 9. Feature: New Entry (Invoice Form)
+
+The most complex page in the app. Located at `#page-entry`, and `#page-edit-invoice` for editing existing invoices.
+
+### Form Structure
+
+The form is divided into numbered sections:
+1. **Invoice Information** — Party, Date, Invoice No., PO No., Method, Paid By
+2. **Line Items Table** — multiple rows, each with: Description, Quantity, Unit, KG/Bag (optional), Total KG (auto-calc), Price, Total
+3. **Payment** — amount paid at time of invoice (for cash transactions)
+4. **Notes** — free text
+
+### Party Dropdown + Duplicate Warning
+
+The Party dropdown lists all parties from `AD().customParties` plus any party names found in existing records. When the same vendor has had multiple invoices on the same date, a warning appears in `#party-dupe-warn`:
+
+> "⚠ PARTY NAME already has 2 invoice(s) on DATE. Check before saving."
+
+The `+` button next to the dropdown opens the Manage Parties modal for inline party creation without leaving the form.
+
+### Line Item Table
+
+Each row is a `<tr data-lid="N">` with inputs:
+- `.li-desc` — Description (type-to-search combobox)
+- `.li-qty` — Quantity
+- `.li-unit` — Unit (select, built-in + custom options)
+- `.li-kgbag` — KG per Bag (only visible in Purchase mode)
+- `.li-totalkg` — Total KG (read-only, auto-calculated)
+- `.li-price` — Price per unit (or per KG when kgPerBag is set)
+- `.li-total` — Row total (auto-calculated, but can be manually overridden)
+
+**KG Column Visibility:**
+The KG/Bag and Total KG columns are visible only in Purchase mode. When switching modes or loading the edit form, `_updateKgColumnsVisibility(isSales)` runs to show/hide these columns. This is because Sales never tracks raw material weights — only PCS counts.
+
+### Description Combobox (`_dcInput`, `_dcItems`, `_dcActive`)
+
+The description field has a custom floating dropdown, not a native `<datalist>`. This was built because native datalist has inconsistent behavior across Android browsers and cannot be styled.
+
+**Architecture:**
+- A single `<div id="desc-combo-list">` is created lazily and appended to `document.body` (not inside the table), so it's never clipped by the table's `overflow: hidden`
+- `position: fixed` so it stays in the viewport regardless of scroll
+- A single `_dcInput` variable tracks which row's input currently owns the dropdown
+- `_dcPosition(list)` re-positions the dropdown under the active input on every scroll and resize event
+
+**Flip Logic (Open Up vs. Open Down):**
+```javascript
+const spaceBelow = window.innerHeight - r.bottom;
+if(spaceBelow < 180 && r.top > spaceBelow) {
+  list.style.top = (r.top - h - 3) + 'px'; // Open upward
+} else {
+  list.style.top = (r.bottom + 3) + 'px';  // Open downward
+}
+```
+The dropdown flips above the input when there is not enough space below. This prevents it from appearing off-screen on the last few rows of the table.
+
+**Search Priority:**
+```javascript
+function _dcFilter(q) {
+  const starts   = all.filter(d => d.toLowerCase().startsWith(q));
+  const contains = all.filter(d => !d.toLowerCase().startsWith(q) && d.toLowerCase().includes(q));
+  return starts.concat(contains).slice(0, 60);
+}
+```
+Items that START with the query appear before items that merely CONTAIN it. This matches the behavior of better autocomplete UIs (Google search, Slack, etc.).
+
+**Keyboard Navigation:**
+- `ArrowDown` — open or move selection down
+- `ArrowUp` — move selection up
+- `Enter` — select highlighted item, move focus to Qty field
+- `Tab` — accept selection, let normal tab flow continue (does not preventDefault)
+- `Escape` — close without selecting
+
+### Auto-Fill: Last Price (`getLastRate`)
+
+When a description is selected, the app looks through all past invoices to find the last price used for that item:
+
+```javascript
+function getLastRate(descVal, partyVal) {
+  const matching = AD().records.filter(r =>
+    r.items.some(it => it.desc === descVal && parseFloat(it.price) > 0)
+  );
+  const sorted = matching.sort((a,b) => b.date.localeCompare(a.date)); // newest first
+  
+  // Priority 1: Same party's last rate
+  const samePartyRate = sorted.filter(r => r.party === partyVal).find(r => ...);
+  if(samePartyRate) return { rate, source: 'party' };
+  
+  // Priority 2: Any party's last rate (global fallback)
+  const globalRate = sorted.find(r => ...);
+  if(globalRate) return { rate, source: 'global' };
+  
+  return null;
+}
+```
+
+Same-party pricing takes priority. If MAJEED QURESHI last charged AED 22.50 for pallets but AHMED WOOD charged AED 20.00 more recently, creating a new invoice for MAJEED will pre-fill AED 22.50.
+
+The auto-fill uses a `data-autofill` flag on the input:
+- `data-autofill="1"` — this value was set automatically, can be overridden on next desc change
+- `data-autofill="0"` — user typed a price manually, never auto-overwrite
+
+### Auto-Fill: Last KG/Bag (`getLastKgPerBag`)
+
+Same pattern as `getLastRate` but for the KG/Bag field. So if Gutka was always 25 KG per bag, selecting "GUTKA PURCHASE" auto-fills both the rate AND the KG/Bag value from the most recent matching record.
+
+### Total Calculation Logic (`calcRowTotal`)
+
+```javascript
+function calcRowTotal(id) {
+  const qty = parseFloat(tr.querySelector('.li-qty').value) || 0;
+  const price = parseFloat(tr.querySelector('.li-price').value) || 0;
+  const kgPerBag = parseFloat(kgBagEl.value) || 0;
+
+  if(kgPerBag > 0) {
+    // Weight-based pricing: Total KG = Qty × KG/Bag; Total = Total KG × Price
+    const totalKg = qty * kgPerBag;
+    totalKgEl.value = totalKg.toFixed(2);
+    tEl.value = (totalKg * price).toFixed(2);
+  } else {
+    // Piece-based pricing: Total = Qty × Price
+    tEl.value = (qty * price).toFixed(2);
+  }
+  updateGrandTotal();
+}
+```
+
+### Manual Total Override (`onCustomTotal`)
+
+If a user types directly into the Total field, it sets `tEl.dataset.manual = '1'`. After that, `calcRowTotal` skips this row's total:
+```javascript
+if(tEl.dataset.manual === '1') { updateGrandTotal(); return; }
+```
+The manual flag is cleared when the user changes the Qty or Price, which resets the total to auto-calculated.
+
+### VAT Support (Sales Mode)
+
+When VAT is enabled on an invoice:
+- A 5% VAT amount is calculated on the subtotal
+- The invoice total = subtotal + VAT
+- On the printed invoice, a "Tax Invoice" badge appears between the From/To party blocks
+- The company TRN number appears on the invoice
+
+### Cash Sync — Payment Date Auto-Sync
+
+When the invoice date changes, if the party is a Cash party (CASH WOOD, CASH PALLETS, CASH SALE), the payment date is auto-synced:
+```javascript
+function syncCashPayDate() {
+  if(CASH_PARTIES_LIVE.includes((document.getElementById('e-party').value||'').toUpperCase())) {
+    const payDate = document.getElementById('e-cash-pay-date');
+    if(payDate) payDate.value = document.getElementById('e-date').value;
+  }
+}
+```
+
+### Invoice Number Auto-Increment
+
+Invoice numbers (`INV-001`, `INV-002`, ...) come from `AD().nextInv` which is:
+1. Read from Firebase on startup (`almadhi[/sales]/meta.nextInv`)
+2. Incremented locally and written to Firebase on every new invoice
+3. Resolved as `Math.max` between local and Firebase value (prevents any race condition from multi-device simultaneous entry from lowering the counter)
+
+### Tab Order (`_rebuildEntryTabOrder`)
+
+The entry form rebuilds a custom tab order after any DOM change (adding/removing rows, switching modes). It uses a `data-nav` attribute system to create a logical Tab sequence: Description → Qty → Unit → (KG/Bag) → Price → Total → next row's Description.
+
+### Mobile Spacing Fix (`_amcTightenEntrySpacing`)
+
+A runtime function applies `!important` inline styles to tighten spacing on screens ≤ 640px. It uses a `MutationObserver` on `#page-entry` to re-apply on every DOM change (adding/removing line items, switching modes). This ensures the form never looks broken on narrow phones regardless of what the stylesheet says.
+
+---
+
+## 10. Feature: All Records (Invoice List)
+
+### Record Cards
+
+Each invoice/bill is rendered as a card (not a row in a table on mobile). Cards show:
+- Invoice number and date
+- Party name
+- Total amount
+- Outstanding balance (invoice total minus all payments allocated to this party via FIFO)
+- Payment status badge: Paid / Partial / Outstanding
+- Due date status: Overdue Xd / Due today / Due in Xd (only when the party has credit days set)
+- Action menu (three-dot button): Edit, Duplicate, Delete, Print, Urdu Print
+
+### FIFO Balance per Record
+
+The outstanding balance shown on each invoice card uses `_remainingByRecord()`:
+
+```javascript
+function _remainingByRecord() {
+  // For each party: sort their invoices oldest first
+  // Consume that party's total payments against oldest invoices first (FIFO)
+  // Whatever remains on each invoice = its individual outstanding amount
+}
+```
+
+This means a customer who paid AED 5,000 against AED 8,000 of invoices will show the oldest invoice as "Paid" and the newer one as "Partial" — not both invoices as partially paid.
+
+### Filters
+
+- Text search (party name, invoice number, notes)
+- Date range (from/to with quick buttons: Today, This Week, This Month, Last Month, etc.)
+- Party filter (dropdown)
+- Status filter: All / Outstanding / Overdue / Paid
+
+### Drill-Down from Dashboard
+
+When the user clicks an overdue or recent-activity panel on the dashboard and is redirected to Records, the date range filters are pre-populated to match the dashboard's selected range. This is the `drillRecords()` function.
+
+### Undo Toast
+
+Deletion of a record shows a 5-second undo toast. The deleted record is first saved to `almadhi/trash/record_ID`, then removed from the real path. The undo button restores it from the backup and removes the trash copy.
+
+---
+
+## 11. Feature: Payments
+
+### Payment Entry Form
+
+Payment recording works differently from invoices. A payment is always linked to a **party**, not to a specific invoice (the allocation is handled by the FIFO system, not explicit linking at entry time, unless the user explicitly creates an allocation).
+
+Fields:
+- Date
+- Party (type-to-search combo)
+- Amount (AED)
+- Payment Method (Cash, Cheque, Account Transfer, Pakistan, Online, Cash Paid, Bank Transfer)
+- Paid By (Ziad, Zulfiqar, Other — plus custom)
+- Invoice Period (free text, e.g. "July 2025")
+- Notes
+
+### Payment Allocations
+
+When viewing or editing a payment, an optional Allocations section lets the user link specific amounts to specific invoice IDs. These allocations are saved in the payment object:
+```json
+"allocations": [{ "invId": 42, "allocated": 3000 }]
+```
+These power the printed payment receipt which shows exactly which invoice was settled.
+
+### Payment Receipt Printing
+
+Each payment can be printed as a formal **Payment Receipt** or **Collection Receipt** (for Sales). The receipt prints in a new popup window and includes:
+- Company logo and header
+- Voucher number (auto-generated)
+- Party name and payment method
+- Linked invoice table (if allocations exist)
+- Amount paid
+- Party balance after this payment
+- Company footer with phone and email
+
+The receipt uses inline-defined styles so it works in any new-window context without needing to copy the main stylesheet.
+
+### Payments KPI Summary Bar
+
+Above the payments list, a navy summary bar shows:
+- Total Paid in range
+- Breakdown by method (Cash / Cheque / etc.)
+- Count and total
+
+### Collections Panel (Dashboard) — Reminder Messages
+
+The Collections panel shows parties with outstanding balances and a "Send Message" button per party. The button generates a WhatsApp message in either English or Urdu (based on the language toggle). This is a pre-filled WhatsApp `wa.me/?text=...` URL, not an API call — it opens WhatsApp with the message pre-typed.
+
+---
+
+## 12. Feature: Statement (Search & Statement)
+
+### What Statements Show
+
+A statement is a chronological list of all transactions with a party — every invoice and every payment — with a running balance column. The final balance = opening balance + total invoiced − total paid.
+
+### English Statement
+
+Standard left-to-right layout. Columns:
+- Date
+- Invoice / Reference
+- Description (item names from invoice)
+- Due Date (invoice date + credit days, if set)
+- Status badge (Paid / Partial / Due in Xd / Overdue Xd / Due today)
+- Debit (invoice amount, in red)
+- Credit (payment amount, in green)
+- Balance (running total)
+
+### Urdu Statement
+
+Right-to-left layout using `direction: rtl`. All labels in Urdu (Cairo/Naskh font). Numbers, amounts, dates remain `direction: ltr` (these are displayed using `display: inline-block` with explicit LTR direction so they appear correctly inside the RTL context).
+
+The Urdu statement uses a hidden iframe for printing — not `window.open()` — because `window.open()` crashes Samsung Browser on Android when the app is hosted remotely (GitHub Pages, Firebase Hosting). The iframe approach is invisible to the user, loads the document, and triggers `window.print()` after 600ms.
+
+```javascript
+var iframe = document.createElement('iframe');
+iframe.style.cssText = 'position:fixed;top:-9999px;...';
+document.body.appendChild(iframe);
+iframe.onload = function() {
+  setTimeout(() => { iframe.contentWindow.print(); }, 600);
+};
+```
+
+### Bilingual Combined Print
+
+The statement page has a toggle that lets the user print both English and Urdu statements in one action — the English statement on page 1, Urdu on page 2 (using CSS page-break), in a single print dialog.
+
+### Invoice Status Algorithm
+
+```javascript
+function _invoiceStatus(dueDate, balanceRemaining) {
+  if(!dueDate) return null;   // No credit terms → no status shown
+  if(balanceRemaining <= 0.5) return { label: 'Paid', kind: 'paid' };
+  const diff = daysBetween(dueDate, todayISO);  // positive = overdue
+  if(diff > 0) return { label: `Overdue ${diff}d`, kind: 'overdue' };
+  if(diff === 0) return { label: 'Due today', kind: 'due' };
+  return { label: `Due in ${-diff}d`, kind: 'upcoming' };
+}
+```
+
+---
+
+## 13. Feature: Cheque Register
+
+### Shared Across Modes
+
+The cheque register is intentionally one list for the entire business. `CHQ()` always returns `DB.purchase.cheques`. There is only one Firebase listener for cheques (`almadhi/cheques`). This was a deliberate architectural decision — bank cheques span both purchase and sales activity.
+
+### Cheque Object Fields
+
+- `party` — who the cheque is from/to
+- `chequeNo` — the 6–7 digit number printed on the cheque
+- `amount` — value in AED
+- `date` — the date printed on the cheque (when it can be cashed)
+- `givenDate` — when the cheque was physically handed over
+- `note` — free text (what it's for)
+- `cleared` — boolean: has it physically cleared the bank?
+
+### Duplicate Detection Logic
+
+Cheque numbers repeat in real business practice — the same 6-digit number can appear on different dates from different cheque books. So duplicate detection is based on **number + date together**, not number alone:
+
+```javascript
+function chqFindDuplicate(chequeNo, date, excludeId) {
+  const no = (chequeNo||'').trim().toLowerCase();
+  if(!no) return null;  // Blank cheque numbers are never duplicates
+  return CHQ().find(x =>
+    x.id !== excludeId &&
+    x.chequeNo.trim().toLowerCase() === no &&
+    x.date === date   // Same number AND same date = true duplicate
+  ) || null;
+}
+```
+
+### Summary Bar (Two-Level)
+
+The navy summary bar above the table has two levels:
+- **Level 1:** Total for the selected range (all statuses)
+- **Level 2:** Cleared total vs. Pending total (same range)
+
+The Cleared and Pending boxes are interactive — clicking one filters the table to just that status. Clicking the active one removes the filter:
+
+```javascript
+function chqFilterByStatus(status) {
+  const sel = document.getElementById('chq-status-filter');
+  sel.value = (sel.value === status) ? 'all' : status;  // Toggle
+  renderChequeRows();
+}
+```
+
+### KPI Cards
+
+Four cards above the table:
+- Total Cheques (all time)
+- Pending (amber, not yet cleared)
+- Cleared (green, bank-confirmed)
+- Due Soon (red, due within 7 days from today)
+
+### Excel Export & Import
+
+**Export:** Uses SheetJS to write all cheques to an `.xlsx` file with columns: Party, Cheque No., Amount (AED), Date, Status, Note, Given Date.
+
+**Import from Excel:**
+```javascript
+const wb = XLSX.read(ev.target.result, { type:'array' });
+const ws = wb.Sheets[wb.SheetNames[0]];
+// cellDates intentionally OFF — raw numeric Excel serials processed manually
+const rows = XLSX.utils.sheet_to_json(ws, { header:1, raw:true });
+```
+
+The `cellDates: false` option is critical. With it on, XLSX's Date objects get shifted back by one day for anyone in timezones west of UTC (since XLSX internally uses `toISOString()` which converts to UTC). With it off, numeric serials arrive and are converted with a timezone-safe formula:
+
+```javascript
+function chqParseAnyDate(v) {
+  if(typeof v === 'number') {
+    const d = new Date(Math.round((v - 25569) * 86400 * 1000));  // Excel epoch to Unix
+    return d.toISOString().slice(0, 10);  // Stays UTC, no timezone shift
+  }
+}
+```
+
+The formula `(serial - 25569) * 86400 * 1000` converts Excel's "days since Jan 0, 1900" epoch to a Unix timestamp.
+
+### Delete All Cheques — Password Gate
+
+The "Delete All" function requires typing the app password to confirm. Unlike all other security operations which accept PIN or biometric, Delete All is **password-only**:
+
+```javascript
+// LOCK.checkPin() validates the typed text against the stored hash
+// There is no biometric path in this flow at all
+const ok = await LOCK.checkPin(pass);
+```
+
+This prevents someone who already has biometric access from bulk-deleting data accidentally.
+
+---
+
+## 14. Feature: Expenses Module
+
+### Separate from Invoices
+
+Business expenses are stored in `DB.expenses` — a completely separate collection from `DB.purchase.records`. They represent operating costs of the company itself (not raw material purchases):
+- Office rent
+- Utility bills
+- Fuel
+- Maintenance costs
+- Salary (tracked separately in `DB.salPayments`)
+
+Expenses appear on the dashboard in the Expenses view of the Hero KPI and are totaled separately in the "Expenses" segment of the combined business overview.
+
+### Locked Salary Mirror
+
+There is a concept of a "locked" expense entry that mirrors salary payments. When salary is processed, a corresponding expense entry is created automatically with `locked: true`. This entry:
+- Is never shown in the normal business expense total
+- Is excluded from `rangeBizExpenses()` which powers the dashboard
+- Prevents double-counting alongside the actual salary total from `DB.salPayments`
+
+```javascript
+function rangeBizExpenses() {
+  const l = (DB.expenses||[]).filter(x => !x.locked);  // Exclude locked salary mirror
+  return dashHasRange() ? l.filter(x => dashInRange(x.date)) : l;
+}
+```
+
+---
+
+## 15. Feature: Delivery Notes
+
+### Purpose
+
+A Delivery Note (DN) is a logistics document sent with goods. It lists what's being delivered, who's receiving it, vehicle and driver details, and has a signature block. It is distinct from an invoice — the invoice is financial, the delivery note is operational.
+
+### Link to Invoice
+
+Each delivery note can be linked to a sales invoice via `linkedInvoice` (stores the invoice number text, not an ID). `findLinkedInvoiceForDN(dn)` searches through `DB.sales.records` to match by invoice number and returns the matching record.
+
+### Duplicate Delivery Note
+
+`duplicateDeliveryNoteFromModal()` copies all fields of an existing DN into `window._dnPrefill` and opens the DN entry form with that prefill. The new DN gets the next sequential DN number but inherits all other fields. This is useful for recurring deliveries to the same customer.
+
+### Print Scope Toggle (DN Only / DN + Invoice)
+
+The delivery note view page has a toggle:
+- **DN Only** — prints just the delivery note
+- **DN + Linked Invoice** — prints the delivery note, then the linked invoice on the next page (CSS page break between them)
+
+```javascript
+function printDeliveryNote() {
+  let printHtml = buildDeliveryNoteDocHtml(dn);
+  if(_dnPrintScope === 'both') {
+    const found = findLinkedInvoiceForDN(dn);
+    printHtml += buildInvoiceDocHtml(found.rec, 'print-page-break');
+  }
+  // Opens popup window, writes HTML, triggers print
+}
+```
+
+The `print-page-break` class forces a CSS page break between DN and invoice in the print dialog.
+
+### Signature Section
+
+The delivery note printout includes a three-block signature row:
+1. Receiver Name (pre-filled if `receiverName` was entered)
+2. Receiver Signature (blank line)
+3. Company Stamp box (shows company stamp image if stamp is enabled in settings, otherwise a "Company Stamp" placeholder)
+
+---
+
+## 16. Feature: Quotations
+
+The quotation page (`#page-quotation` / `amqFit`) produces formal price quotes for potential customers. Key behaviors:
+
+- `amqFit()` is called after navigation with a 80ms delay to ensure the page has rendered before any layout calculations
+- The quotation uses the same `.inv-doc` CSS class as invoices for a consistent document appearance
+- Quotations have their own numbering sequence and are not counted in revenue figures
+- The print system uses the same popup window approach as invoices
+
+---
+
+## 17. Feature: Global Search
+
+### Modal Architecture
+
+`#gsearch-modal` is a full-page overlay with a search input at the top. Results appear below in grouped sections.
+
+### What is Searched
+
+The global search (`runGlobalSearch()`) searches simultaneously across:
+- **Records** — invoice number, party name, notes, item descriptions
+- **Payments** — party name, method, notes, paid-by
+- **Cheques** — party name, cheque number, notes
+- **Parties** — party name, phone, email
+
+Results are grouped by category with section headers.
+
+### Date Search Mode
+
+A calendar icon toggles a date sub-panel allowing search by specific date. This is separate from text search — when a date is entered, the text search is still active and both filters apply simultaneously.
+
+### Search Shortcut
+
+`Ctrl+K` (or `Cmd+K` on Mac) opens the global search from anywhere. `Escape` closes it.
+
+### Navigation from Results
+
+Tapping a result navigates to the appropriate page and opens the edit form directly. For records, this means calling `openEditInvoice(rec.id)`. For payments, `openEditPayment(pay.id)`. Results open the record in context, not just the list page.
+
+---
+
+## 18. Feature: App Lock (PIN + Biometric)
+
+### Architecture
+
+The lock system is defined in a `LOCK` object:
+
+```javascript
+const LOCK = {
+  STORAGE_KEY: 'almadhi_pin',
+  hasPin()  { return !!localStorage.getItem(this.STORAGE_KEY); },
+  setPin(hash)    { localStorage.setItem(this.STORAGE_KEY, hash); },
+  removePin()     { localStorage.removeItem(this.STORAGE_KEY); },
+  async checkPin(raw) {
+    const hash = await sha256Hex(raw);
+    return hash === localStorage.getItem(this.STORAGE_KEY);
+  },
+  getBio()  { return localStorage.getItem('almadhi_bio_enabled') === 'true'; },
+  setBio(v) { localStorage.setItem('almadhi_bio_enabled', v ? 'true' : 'false'); },
+};
+```
+
+The PIN hash is stored in `localStorage` for fast local checks and simultaneously synced to Firebase `almadhi/settings.pinHash` for multi-device consistency. When any device changes the PIN, the new hash propagates to all devices via the `onValue` listener for settings.
+
+### SHA-256 Hashing
+
+```javascript
+async function sha256Hex(text) {
+  const enc = new TextEncoder().encode(text);
+  const buf = await crypto.subtle.digest('SHA-256', enc);
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2,'0')).join('');
+}
+```
+
+Uses the browser's native `crypto.subtle` API — no external crypto library needed. The hash is hex-encoded.
+
+### Lock Screen
+
+When a PIN is set, the app shows a full-page lock overlay with:
+- PIN dot display (fills a dot for each digit typed)
+- Custom numeric keypad (1-9, 0, backspace, confirm)
+- Biometric unlock button (if enrolled)
+- Text/password field fallback (for accessibility or forgotten PIN)
+
+### Biometric (WebAuthn)
+
+**Enrollment** (`lockBioRegister`):
+```javascript
+await navigator.credentials.create({
+  publicKey: {
+    challenge: crypto.getRandomValues(new Uint8Array(32)),
+    rp: { name: 'Al Madhi ERP', id: location.hostname },
+    user: { id: crypto.getRandomValues(new Uint8Array(16)), name: 'owner', displayName: 'Owner' },
+    pubKeyCredParams: [{ type:'public-key', alg:-7 }, { type:'public-key', alg:-257 }],
+    authenticatorSelection: { authenticatorAttachment: 'platform', userVerification: 'required' }
+  }
+});
+```
+Stores credential rawId as base64 in `localStorage('almadhi_bio_cred')`.
+
+**Verification** (lock screen unlock):
+```javascript
+await navigator.credentials.get({
+  publicKey: {
+    challenge: crypto.getRandomValues(new Uint8Array(32)),
+    allowCredentials: [{ id: base64ToBuf(credId), type: 'public-key' }],
+    userVerification: 'required'
+  }
+});
+```
+
+If the credential matches → `sessionStorage.setItem('almadhi_unlocked', 'yes')` → lock screen hides.
+
+### PIN Setup Flow
+
+Three stages for setting a PIN:
+- **Stage 0** (if PIN exists): Enter current PIN to verify identity
+- **Stage 1**: Enter new PIN (minimum 4 digits)
+- **Stage 2**: Confirm new PIN (must match Stage 1 exactly)
+
+On success, the hash is saved locally and written to Firebase.
+
+### Re-Lock on Tab Hide
+
+```javascript
+document.addEventListener('visibilitychange', () => {
+  if(document.hidden) {
+    sessionStorage.removeItem('almadhi_unlocked');
+  } else {
+    // Check if we should show lock screen again
+    lockInit();
+  }
+});
+```
+
+Every time the app is backgrounded, the unlock state is cleared. Returning to the app re-triggers the PIN/biometric prompt.
+
+### Wrong-PIN Notification
+
+Every incorrect PIN attempt is logged (count in localStorage) and generates a notification in the notification center with timestamp and attempt number.
+
+---
+
+## 19. Feature: Party Management
+
+### Manage Modal (Add / Edit Custom Data)
+
+The Manage modal (`openManageModal()`) handles all "master data" management:
+- **Parties** (vendors/customers) — Add new, rename, delete
+- **Descriptions** (item names) — Add, edit (with optional default unit), delete
+- **Units** — Add, delete
+- **Payment Methods** — Add, delete
+- **Paid By** — Add, delete
+
+Each tab saves immediately to Firebase when items are added or deleted.
+
+### Party Edit Modal (`#party-edit-modal`)
+
+A richer secondary form for editing a party's **profile details** — not just the name. Fields:
+
+| Field | Purpose |
+|---|---|
+| Company Name (EN/UR) | Formal company name shown on invoices |
+| Contact Person (EN/UR) | Individual's name (was previously the main party name — now a secondary line) |
+| Phone | Contact number |
+| TRN | UAE Tax Registration Number |
+| Email | Contact email |
+| Address (EN/UR) | Business address for both languages |
+| Credit Limit (AED) | Maximum outstanding allowed |
+| Credit Days | Payment terms — invoice date + this many days = due date |
+
+**The immutable key principle:** The `name` field (matching key) is fixed and never changeable from this modal. Editing Contact Person no longer renames the party across all invoices/payments — which was a critical bug in an earlier version.
+
+### Party Display on Invoices
+
+Priority on printed invoices:
+1. `companyEn` (English) / `companyUr` (Urdu) — shown as bold heading
+2. `contactEn` / `contactUr` — shown as secondary line ("Attn: NAME")
+
+If no company name is filled, the internal `name` (matching key) is used as the heading.
+
+---
+
+## 20. Feature: User Management
+
+### Create User Modal
+
+Accessible from the drawer under Settings. Creates user records in Firebase at `almadhi/users/USER_ID`:
+
+```javascript
+await window._fbSet(window._fbRef(window._db, 'almadhi/users/' + uid), {
+  firstName, lastName, fullName, role, email, bioEnabled,
+  createdAt: new Date().toISOString(), createdBy: 'admin'
+});
+```
+
+Fields: First Name, Last Name, Role (dropdown), Email, Password (with strength meter), Confirm Password, Enable Biometric toggle.
+
+### Password Strength Meter
+
+```javascript
+function cuCheckStrength() {
+  let score = 0;
+  if(pw.length >= 8) score++;
+  if(pw.length >= 12) score++;
+  if(/[A-Z]/.test(pw)) score++;
+  if(/[0-9]/.test(pw)) score++;
+  if(/[^A-Za-z0-9]/.test(pw)) score++;
+  // 5 criteria: length ≥8, length ≥12, uppercase, number, special char
+  // Colors: red (1-2) → amber (3) → green (4-5)
+}
+```
+
+A horizontal progress bar fills and changes color in real time as the user types. Score labels: "Too short / Weak / Fair / Strong / Very strong".
+
+Note: This is purely a UI feature. User authentication uses Firebase Auth (though the code comment says "Auth removed — save user info directly to DB") — meaning the actual Firebase auth creation was removed and user data is simply stored in the Realtime Database for reference.
+
+---
+
+## 21. Feature: Export & Backup
+
+### Records Export (CSV / XLSX)
+
+`exportRecordsCSV()` checks if XLSX is loaded — if yes, it delegates to `exportRecordsXLSX()`. The XLSX version produces properly formatted multi-column spreadsheets with correct column widths.
+
+Multi-item invoice export: each invoice with multiple line items produces one row per item, with the invoice metadata (number, date, party, method) appearing only in the first item's row (blank for subsequent items). This matches accounting software conventions.
+
+### Payments Export (CSV / XLSX)
+
+Similar structure. Columns: Date, Party, Amount, Method, Paid By, Invoice Period, Notes.
+
+### Cheque Export / Import (XLSX only)
+
+Import reads any standard Excel file with columns matching the expected format. The import:
+1. Detects and skips header rows
+2. Parses dates from Excel serials (timezone-safe)
+3. Skips duplicates (cheque no. + date already in system)
+4. Reports counts: `N added, M duplicates, K skipped`
+
+### JSON Backup
+
+A full JSON backup can be exported with all records, payments, cheques, custom data, and settings. The restore process confirms with the user, replaces all data in Firebase, and re-renders.
+
+---
+
+## 22. Feature: Invoice & Document Printing
+
+### Print Architecture
+
+The app uses three different print approaches depending on the document type:
+
+**1. Popup Window (`window.open`)** — for English invoices, English statements, payment receipts, delivery notes (when the app is on localhost/file protocol)
+
+```javascript
+const printWin = window.open('', '_blank', 'width=980,height=760');
+const styles = Array.from(document.querySelectorAll('style')).map(s => s.outerHTML).join('\n');
+printWin.document.write('<!DOCTYPE html><html><head>' + styles + '</head><body>' + html + '...');
+printWin.document.close();
+// Auto-prints after 450ms delay
+```
+
+All app `<style>` blocks are captured and injected into the print popup so the document renders identically to the app's view.
+
+**2. Hidden iFrame** — for Urdu statements/invoices (needed for Samsung Browser compatibility)
+
+Samsung Browser on Android crashes `window.open()` when the app is hosted remotely. The solution is a 1×1px hidden iframe that renders the document invisibly, then triggers `contentWindow.print()`.
+
+**3. Direct Print (same window)** — for specific narrow cases where the app shell itself is the print target
+
+### Invoice HTML Builder (`buildInvoiceDocHtml`)
+
+The English invoice is built as a string of HTML. Key sections:
+- `inv-topbar` — 8px navy-to-gold gradient strip
+- Company logo (inline SVG of the Al Madhi shield/crest with gold border)
+- `inv-hdr` — company name, tag, invoice number chip, date, status
+- `inv-bill-row` — From / To parties side by side; "Tax Invoice + TRN" badge centered between them if VAT applied
+- `inv-table` — line items with dark navy header, zebra rows
+- `inv-totals` — subtotal, VAT (if applicable), grand total in navy block
+- `inv-stamp-block` — company stamp image (if enabled in settings)
+- `inv-ftr` — contact details, brand tagline
+
+### Urdu Invoice (`buildUrduInvoiceDocHtml`)
+
+Mirrors the English invoice format exactly, with:
+- `direction: rtl` on the container
+- Cairo/Naskh font for all text
+- Gradient reversed: gold → navy (LTR order, which displays right-to-left in RTL context)
+- Numbers and dates use `direction: ltr; display: inline-block` to read correctly
+- The "Tax Invoice" badge uses mixed direction: Arabic label RTL, TRN number LTR
+
+### Bulk Print
+
+The Records page supports selecting multiple invoices and printing them all in one action. Each invoice gets `.inv-doc-page` class with `page-break-after: always`, creating a separate page per invoice in the print dialog.
+
+### Company Stamp
+
+The app has a feature to show a company stamp image on invoices and delivery notes. The stamp image URL/data is stored in settings (`AMQ_STAMP`). A toggle per document type controls whether the stamp appears. The stamp is rendered as `<img class="ams-stamp-img">` in the signature area.
+
+---
+
+## 23. Offline Read-Cache System
+
+### Architecture
+
+Firebase is the ONLY source of truth — there is no localStorage primary store. However, to enable reading data when offline, a snapshot of the current data is saved to localStorage after every successful Firebase update:
+
+```javascript
+function cacheDB() {
+  try {
+    localStorage.setItem('almadhi_cache_' + DB.mode, JSON.stringify({
+      records:  AD().records,
+      payments: AD().payments,
+      cheques:  CHQ(),
+      nextId:   AD().nextId,
+      nextInv:  AD().nextInv,
+      custom:   { parties, descs, units, methods, paidby },
+      ts:       Date.now()
+    }));
+  } catch(e) {}
+}
+```
+
+### Hydration on Startup
+
+When the app starts, before Firebase data arrives, `hydrateFromCache()` loads the localStorage snapshot:
+
+```javascript
+function hydrateFromCache() {
+  if(AD().records.length) return;  // Firebase already populated — skip
+  // Load cache into DB arrays
+  // Use Math.max for sequence numbers (prevent regression)
+}
+```
+
+This gives instant read-access to old data while Firebase connects. The user sees their last-session records immediately, then the live Firebase data replaces it when the connection is ready.
+
+### Read-Only vs. Read-Write Offline
+
+Offline reads are always available (from cache). Offline writes go to `window._writeQueue` and show a "Offline — write queued" toast. There is no optimistic local commit pattern — the data is only rendered after Firebase confirms. This is deliberate: it prevents showing data that hasn't been verified as persisted.
+
+---
+
+## 24. Responsive & Multi-Device Design
+
+### Breakpoints
+
+- `≤ 430px` — compact mobile: bottom nav only, compressed entry form, segments hide labels
+- `431px – 900px` — tablet portrait: topbar inline nav, no sidebar
+- `≥ 901px` — desktop: persistent sidebar, full topbar
+
+### Samsung Galaxy Z Fold Inner Screen
+
+The app has a specific nav for foldable phones when the inner 8" display is active (`#inner-pill-nav`). On this display size, the page is wide enough for a topbar nav but not quite a full sidebar. The inner pill nav shows at the top with icon+label buttons.
+
+### Topbar Height CSS Variable
+
+```css
+:root { --topbar-h: 52px; }
+@media screen and (min-width: 431px) and (max-width: 900px) { :root { --topbar-h: 48px; } }
+@media screen and (min-width: 901px) { :root { --topbar-h: 58px; } }
+```
+
+The sidebar's `top` position is set to `var(--topbar-h)` so it starts exactly where the header ends, at all screen sizes. All content padding-top also reads from this variable.
+
+### Sidebar Collapsed Rail
+
+```css
+:root { --sidebar-w: 236px; --rail-w: 64px; }
+```
+
+When collapsed (`body.sb-collapsed`), the sidebar shrinks to 64px showing only icons. Content area margin adjusts:
+```css
+body.sb-collapsed #app-scroll { margin-left: var(--rail-w); }
+body:not(.sb-collapsed) #app-scroll { margin-left: var(--sidebar-w); }
+```
+
+A floating "expand" pill button appears on the right edge of the collapsed rail. The collapsed/expanded state is persisted in localStorage.
+
+### PWA & Mobile Meta Tags
+
+```html
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="theme-color" content="#0a1f3d">
+<link rel="manifest" href="manifest.json?v=3">
+```
+
+Cache-busting `?v=3` on the manifest ensures browsers pick up icon/name changes.
+
+---
+
+## 25. Utility Functions & Core Logic
+
+### `fmt(n)` — Number Formatting
+
+Used everywhere for money display:
+```javascript
+function fmt(n) {
+  return Number(n||0).toLocaleString('en-AE', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  });
+}
+```
+
+Uses the `en-AE` locale — UAE English — which uses comma thousands separators and period decimal: `1,234.56`.
+
+### `_compact(n)` — Compact Currency for Tight Spaces
+
+```javascript
+function _compact(n) {
+  if(n >= 1e6) return (n/1e6).toFixed(1) + 'M';  // 1.4M
+  if(n >= 1e3) return (n/1e3).toFixed(1) + 'k';   // 340k
+  return String(Math.round(n));                     // 980
+}
+```
+
+Used on KPI cards where space is limited. `1,400,000` becomes `1.4M`.
+
+### `fmtDate(d)` — Date Formatting
+
+```javascript
+function fmtDate(d) {
+  if(!d) return '—';
+  const dt = new Date(d + 'T00:00:00');  // Force local time, not UTC midnight
+  return dt.toLocaleDateString('en-GB', { day:'2-digit', month:'short', year:'numeric' });
+}
+```
+
+The `T00:00:00` suffix is critical — without it, `new Date('2025-07-22')` is parsed as UTC midnight and converts to the previous day for users in timezones east of UTC (including UAE, UTC+4).
+
+### `today()` — Current Date as ISO String
+
+```javascript
+function today() {
+  return new Date().toISOString().slice(0, 10);  // "2025-07-22"
+}
+```
+
+### `_stamp()` — Date String for File Names
+
+```javascript
+function _stamp() {
+  const d = new Date(), p = n => String(n).padStart(2,'0');
+  return d.getFullYear() + '-' + p(d.getMonth()+1) + '-' + p(d.getDate());
+}
+```
+
+Used in export file names: `AlMadhi-Records-2025-07-22.xlsx`.
+
+### `toast(msg, type)` — Non-Blocking Notifications
+
+Shows a small chip in the top-right area:
+- Default: navy background (neutral/info)
+- `'success'` — green
+- `'error'` — red
+- `'warn'` — amber
+
+Auto-dismisses after ~2.5 seconds with a fade-out.
+
+### `showUndoToast(msg, undoFn)` — Timed Undo
+
+A special toast with an "Undo" button that stays visible for 5 seconds. If the user taps Undo within that window, `undoFn()` is called to reverse the action (restore from trash, re-push to Firebase).
+
+### `_biqEsc(str)` / `_alEsc(str)` / `_dashEsc(v)` — HTML Escaping
+
+Multiple naming variants of the same XSS-prevention function:
+```javascript
+function _biqEsc(str) {
+  return String(str == null ? '' : str).replace(/[&<>"']/g, m =>
+    ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'": '&#39;' }[m])
+  );
+}
+```
+
+All user-entered text (party names, descriptions, notes, invoice numbers) passes through an escape function before being inserted into `innerHTML`.
+
+### `getParties()` — All Party Names
+
+```javascript
+function getParties() {
+  const fromRecords  = AD().records.map(r => r.party);
+  const fromPayments = AD().payments.map(p => p.party);
+  const fromCustom   = AD().customParties.map(partyName).filter(Boolean);
+  return [...new Set([...fromRecords, ...fromPayments, ...fromCustom])].sort();
+}
+```
+
+Returns deduplicated list of all party names — from both existing records AND the custom party list — merged and sorted alphabetically.
+
+### `getPartyObj(name)` — Party Profile Object
+
+```javascript
+function getPartyObj(name) {
+  return (AD().customParties||[]).find(p => (typeof p === 'object' ? p.name : p) === name) || null;
+}
+```
+
+Returns the full party object with all metadata (address, TRN, credit terms, etc.) or `null` if no profile has been created for that party name.
+
+---
+
+## 26. Form Validation System
+
+### Validation on Blur
+
+Every input with `data-validate` or `required` attribute gets validated when it loses focus:
+
+```javascript
+document.addEventListener('blur', function(e) {
+  if(e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') {
+    if(e.target.hasAttribute('data-validate') || e.target.hasAttribute('required')) {
+      validateFormField(e.target);
+    }
+  }
+}, true);  // Capture phase — fires before the blur event bubbles
+```
+
+Using capture phase (`true`) ensures validation fires even for inputs inside custom components that might stop propagation.
+
+### Validation Rules by `data-validate` Type
+
+| type | Checks |
+|---|---|
+| `email` | `/^[^\s@]+@[^\s@]+\.[^\s@]+$/` |
+| `number` | `isNaN(value)` check |
+| `phone` | `/^[\d\s\-\+\(\)]+$/` |
+| `date` | `/^\d{2}-\w{3}-\d{4}$/` (DD-MMM-YYYY format) |
+
+`required` (no type) — checks for non-empty value.
+
+### Visual States
+
+- **Error:** Red border, red box-shadow on focus, red error message below the field
+- **Success:** Green border, green box-shadow on focus
+- The field classes `.error` and `.success` are added/removed by the validator
+- Error messages are created as `.error-message` divs appended to the field's parent
+
+---
+
+## 27. Keyboard Shortcuts
+
+```javascript
+document.addEventListener('keydown', function(e) {
+  if(e.ctrlKey && e.key === 's') {
+    e.preventDefault();
+    // Find any save button on the page and click it
+    const saveBtn = document.querySelector('button[onclick*="save"], button.btn-success, button[data-action="save"]');
+    if(saveBtn) { saveBtn.click(); toast('Saved successfully', 'success'); }
+  }
+  if(e.key === 'Escape') {
+    // Find any open modal and close it
+    const modal = document.querySelector('.modal-overlay.active, .modal.active');
+    if(modal) { const closeBtn = modal.querySelector('[onclick*="close"], .close-btn, [data-action="close"]'); if(closeBtn) closeBtn.click(); }
+  }
+});
+```
+
+- **Ctrl+S** — triggers the primary save button on whatever form is open
+- **Escape** — closes any open modal (also closes the drawer, global search, and cheque modal via separate listeners)
+- **Ctrl+K / Cmd+K** — opens global search (separate listener)
+- **Arrow keys + Enter/Tab** — navigate the description combobox dropdown
+
+---
+
+## 28. Critical Bug Fixes & Design Decisions
+
+Several significant bugs were identified and fixed with detailed comments preserved in the source code:
+
+**1. Cheque Import Dates Shifted Back by One Day**
+Cause: SheetJS with `cellDates: true` converts Excel date serials to JavaScript Date objects and calls `.toISOString()`, which outputs UTC. For anyone east of UTC (UAE = UTC+4), UTC midnight is 4am local — so the UTC date falls on the previous calendar day.
+
+Fix: `cellDates: false` — receive raw numeric serials. Apply a timezone-safe formula `(serial - 25569) × 86400000` to get a UTC Unix timestamp. Use `.toISOString().slice(0, 10)` — stays UTC, no timezone shift.
+
+**2. Dashboard Not Updating for Non-Active Module's Data**
+Cause: The unified dashboard reads both `DB.purchase` and `DB.sales`. But Firebase listeners were only calling `refreshCurrentPage()` when `DB.mode === moduleKey`. If a colleague saves a sale while you're looking at the Purchase dashboard, the dashboard would go stale.
+
+Fix: Added `else if(_isDashboardActive()) renderDashboard()` — any data change in either module triggers a dashboard re-render if the dashboard is the active page.
+
+**3. Party Renaming Breaking All Historical Records**
+Cause: The Party Edit Modal used to update the `name` field (the matching key). Any change to the party name would create a new key that no longer matched any existing invoice or payment — effectively making them orphaned.
+
+Fix: The `name` field is now immutable. Only metadata fields (`contactEn`, `companyEn`, `phone`, etc.) are editable. The matching key is fixed at creation.
+
+**4. Cash Payment Dates Wrong on Historical Records**
+For cash parties (CASH WOOD, CASH PALLETS), a payment is auto-created at the time of saving the invoice. An early version saved the payment with today's date instead of the invoice's date, creating mismatches that skewed the payment timeline.
+
+Fix: `runCashDateRepair()` runs 2 seconds after startup, matches each cash payment to its corresponding invoice by party + amount + `createdAt` timestamp within 10 minutes, and corrects the date. Idempotent — safe to run repeatedly.
+
+**5. Mode Switch Losing Cheques**
+Cause: An early version scoped cheques by mode (purchase cheques vs. sales cheques). When switching modes, the cheque list appeared empty.
+
+Fix: Cheques are stored in a single shared node (`almadhi/cheques`), always accessed via `CHQ()` which always returns `DB.purchase.cheques`. A legacy self-heal listener migrates any cheques accidentally saved under `almadhi/sales/cheques` into the shared node.
+
+**6. Description Combobox Broken by Special Characters**
+Cause: Item names containing apostrophes, quotes, or ampersands caused JavaScript errors when baked into inline `onclick` strings.
+
+Fix: Event delegation using `data-idx` integer attribute instead of inline handlers with the item name. The list container has one delegated listener that looks up `dispatchPickerCurrentList[idx]`.
+
+**7. Urdu Statement Crashing Samsung Browser**
+Cause: `window.open()` in Samsung Internet on Android fails silently when the app is hosted remotely (e.g., Firebase Hosting, GitHub Pages) due to popup blockers at the browser engine level that can't be dismissed.
+
+Fix: Hidden iframe approach — create a 1×1px off-screen iframe, write the document HTML into its `contentDocument`, and call `contentWindow.print()` after the iframe's `onload` fires. The iframe is cleaned up from the DOM 5 seconds after printing.
+
+**8. Sequential Numbers Race Condition (Multi-Device)**
+Cause: Two users on different devices could read the same `nextInv: 42` and both create `INV-042`.
+
+Fix: `nextInv` is stored in Firebase under `/meta`. On every new invoice:
+1. Read the current value
+2. Increment locally
+3. Write back to Firebase
+4. Use `Math.max(local, firebase)` when comparing — ensures the counter only ever goes up, never backwards
+
+Note: For a high-throughput system this would need Firebase Transactions (`runTransaction`). For this business's usage (a few invoices per day), the existing approach is sufficient.
+
+**9. Mobile Entry Form — Large Gaps Between Labels and Fields**
+Cause: CSS cascade on narrow screens resulted in large margins between each `.form-group` label and its input, caused by a combination of flex-direction, grid, and inherited gap values that differed between `fg-row` layouts on mobile.
+
+Fix: `_amcTightenEntrySpacing()` applies `!important` inline styles at runtime on screens ≤ 640px. It uses a `MutationObserver` to re-apply on every DOM change to the entry page (adding rows, switching modes, loading edit form).
+
+---
+
+*Documentation compiled from `index-59.html` — Al Madhi Carpentry ERP*
+*Total source: ~17,225 lines of HTML, CSS, and JavaScript*
+*Firebase project: `al-madhi-ledger` (Realtime Database)*
