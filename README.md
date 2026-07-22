@@ -68,29 +68,29 @@ See [`docs/DOCUMENTATION.md`](docs/DOCUMENTATION.md) for the full data model and
 
 <table>
 <tr>
-<td align="center"><img src="screenshots/dashboard-purchase.png" width="280"/><br/><sub>Dashboard — Purchase</sub></td>
-<td align="center"><img src="screenshots/dashboard-sales.png" width="280"/><br/><sub>Dashboard — Sales</sub></td>
-<td align="center"><img src="screenshots/dashboard-sales-detail.png" width="280"/><br/><sub>Dashboard — Outstanding &amp; Collections</sub></td>
+<td align="center"><img src="Screenshot/dashboard-purchase.png" width="280"/><br/><sub>Dashboard — Purchase</sub></td>
+<td align="center"><img src="Screenshot/dashboard-sales.png" width="280"/><br/><sub>Dashboard — Sales</sub></td>
+<td align="center"><img src="Screenshot/dashboard-sales-detail.png" width="280"/><br/><sub>Dashboard — Outstanding &amp; Collections</sub></td>
 </tr>
 <tr>
-<td align="center"><img src="screenshots/new-invoice.png" width="280"/><br/><sub>New Invoice</sub></td>
-<td align="center"><img src="screenshots/sales-records.png" width="280"/><br/><sub>All Sales Records</sub></td>
-<td align="center"><img src="screenshots/customer-summary.png" width="280"/><br/><sub>Customer Summary</sub></td>
+<td align="center"><img src="Screenshot/new-invoice.png" width="280"/><br/><sub>New Invoice</sub></td>
+<td align="center"><img src="Screenshot/sales-records.png" width="280"/><br/><sub>All Sales Records</sub></td>
+<td align="center"><img src="Screenshot/customer-summary.png" width="280"/><br/><sub>Customer Summary</sub></td>
 </tr>
 <tr>
-<td align="center"><img src="screenshots/payments-received.png" width="280"/><br/><sub>Payments Received</sub></td>
-<td align="center"><img src="screenshots/search-statement.png" width="280"/><br/><sub>Search &amp; Statement</sub></td>
-<td align="center"><img src="screenshots/items-parties.png" width="280"/><br/><sub>Items &amp; Parties</sub></td>
+<td align="center"><img src="Screenshot/payments-received.png" width="280"/><br/><sub>Payments Received</sub></td>
+<td align="center"><img src="Screenshot/search-statement.png" width="280"/><br/><sub>Search &amp; Statement</sub></td>
+<td align="center"><img src="Screenshot/items-parties.png" width="280"/><br/><sub>Items &amp; Parties</sub></td>
 </tr>
 <tr>
-<td align="center"><img src="screenshots/delivery-note-create.png" width="280"/><br/><sub>Create Delivery Note</sub></td>
-<td align="center"><img src="screenshots/delivery-notes-list.png" width="280"/><br/><sub>Delivery Notes List</sub></td>
-<td align="center"><img src="screenshots/expense-management.png" width="280"/><br/><sub>Expense Management</sub></td>
+<td align="center"><img src="Screenshot/delivery-note-create.png" width="280"/><br/><sub>Create Delivery Note</sub></td>
+<td align="center"><img src="Screenshot/delivery-notes-list.png" width="280"/><br/><sub>Delivery Notes List</sub></td>
+<td align="center"><img src="Screenshot/expense-management.png" width="280"/><br/><sub>Expense Management</sub></td>
 </tr>
 <tr>
-<td align="center"><img src="screenshots/salary-employees.png" width="280"/><br/><sub>Salary &amp; Employees</sub></td>
-<td align="center"><img src="screenshots/cheque-register.png" width="280"/><br/><sub>Cheque Register</sub></td>
-<td align="center"><img src="screenshots/sidebar-more-menu.png" width="280"/><br/><sub>Sidebar / More Menu</sub></td>
+<td align="center"><img src="Screenshot/salary-employees.png" width="280"/><br/><sub>Salary &amp; Employees</sub></td>
+<td align="center"><img src="Screenshot/cheque-register.png" width="280"/><br/><sub>Cheque Register</sub></td>
+<td align="center"><img src="Screenshot/sidebar-more-menu.png" width="280"/><br/><sub>Sidebar / More Menu</sub></td>
 </tr>
 </table>
 
